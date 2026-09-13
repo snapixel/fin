@@ -159,345 +159,348 @@
         </div>
     </div> <!-- END APP CONTAINER -->
 
-    <script>
-        // ==========================================
-        // 🔐 SUPABASE CONFIGURATION
-        // ==========================================
-        const SUPABASE_URL = 'https://vpwsdcaracewchbmepun.supabase.co';
-        const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZwd3NkY2FyYWNld2NoYm1lcHVuIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODkyNDE4NDEsImV4cCI6MjEwNDgxNzg0MX0.TdJSBYQS4HGGxRlc939lRy8bIWyhOAXih42MNq2ie_I';
-        const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+  <script>
+    // ==========================================
+    // 🔐 SUPABASE CONFIGURATION
+    // ==========================================
+    const SUPABASE_URL = 'https://vpwsdcaracewchbmepun.supabase.co';
+    const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZwd3NkY2FyYWNld2NoYm1lcHVuIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODkyNDE4NDEsImV4cCI6MjEwNDgxNzg0MX0.TdJSBYQS4HGGxRlc939lRy8bIWyhOAXih42MNq2ie_I';
+    
+    // Fixed: Renamed to 'db' to prevent collision with the CDN's global 'supabase' variable
+    const db = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 
-        let userSession = null;
-        let appData = { banks: [], deposits: [] };
-        let editingBankId = null;
-        let editingDepositId = null;
-        let portfolioChart = null; 
+    let userSession = null;
+    let appData = { banks: [], deposits: [] };
+    let editingBankId = null;
+    let editingDepositId = null;
+    let portfolioChart = null; 
 
-        window.onload = async function() {
-            const { data: { session } } = await supabase.auth.getSession();
-            if (session) { handleAuthSuccess(session); }
+    window.onload = async function() {
+        const { data: { session } } = await db.auth.getSession();
+        if (session) { handleAuthSuccess(session); }
+    };
+
+    // ==========================================
+    // 🔐 AUTHENTICATION LOGIC
+    // ==========================================
+    async function signup() {
+        const e = document.getElementById('authEmail').value, p = document.getElementById('authPassword').value;
+        const { data, error } = await db.auth.signUp({ email: e, password: p });
+        if (error) document.getElementById('authError').innerText = error.message;
+        else document.getElementById('authError').innerText = "Check your email for confirmation link!";
+    }
+
+    async function login() {
+        const e = document.getElementById('authEmail').value, p = document.getElementById('authPassword').value;
+        const { data, error } = await db.auth.signInWithPassword({ email: e, password: p });
+        if (error) document.getElementById('authError').innerText = error.message;
+        else handleAuthSuccess(data.session);
+    }
+
+    async function logout() {
+        await db.auth.signOut();
+        location.reload();
+    }
+
+    function handleAuthSuccess(session) {
+        userSession = session;
+        document.getElementById('authScreen').style.display = 'none';
+        document.getElementById('appContainer').style.display = 'block';
+        fetchCloudData();
+    }
+
+    // ==========================================
+    // ☁️ CLOUD SYNC & STATE
+    // ==========================================
+    async function fetchCloudData() {
+        const status = document.getElementById('syncStatus');
+        status.innerText = "🔄 Fetching Cloud Data...";
+        status.classList.remove('active');
+
+        const { data: banksData } = await db.from('banks').select('*').order('name');
+        const { data: depositsData } = await db.from('deposits').select('*');
+
+        appData.banks = banksData || [];
+        
+        appData.deposits = (depositsData || []).map(row => {
+            let dep = row.data;
+            dep.id = row.id;         
+            dep.bankId = row.bank_id; 
+            dep.archived = row.archived;
+            return dep;
+        });
+
+        updateLocalUI();
+        status.innerText = "✅ Synced with Supabase";
+        status.classList.add('active');
+    }
+
+    function updateLocalUI() {
+        renderDashboardSummary();
+        renderBankDropdown();
+        renderTable();
+    }
+
+    // ==========================================
+    // 🗂️ UI, MATH & UTILS
+    // ==========================================
+    function switchTab(event, viewId) {
+        document.getElementById('view-dashboard').classList.add('hidden');
+        document.getElementById('view-portfolio').classList.add('hidden');
+        document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
+        document.getElementById(viewId).classList.remove('hidden');
+        if (event && event.currentTarget) event.currentTarget.classList.add('active');
+        else document.querySelector(`[onclick="switchTab(event, '${viewId}')"]`).classList.add('active');
+        if (viewId === 'view-dashboard' && portfolioChart) portfolioChart.resize();
+    }
+
+    function showToast(message) {
+        const toast = document.getElementById("toast"); toast.innerText = message; toast.classList.add("show");
+        setTimeout(() => { toast.classList.remove("show"); }, 3000);
+    }
+
+    function parseTermToMonths(termStr) {
+        let years = 0, months = 0; const yMatch = termStr.match(/(\d+)\s*[Yy]/); const mMatch = termStr.match(/(\d+)\s*[Mm]/);
+        if (yMatch) years = parseInt(yMatch[1]); if (mMatch) months = parseInt(mMatch[1]); return (years * 12) + months;
+    }
+
+    function parseDDMMYY(str) {
+        if (!str) return 0; const parts = str.split('-'); return new Date(`20${parts[2]}`, parts[1] - 1, parts[0]).getTime();
+    }
+
+    function getPaidPrincipal(dep) {
+        if (dep.type === 'FD') return Number(dep.rawPrincipal || dep.principal) || 0;
+        let sDate = dep.rawStartDate ? new Date(dep.rawStartDate) : new Date(parseDDMMYY(dep.startDate));
+        const today = new Date(); today.setHours(0,0,0,0);
+        let termMonths = 0;
+        if (dep.termInputType === 'date' && dep.rawMaturityDate) {
+            const eDate = new Date(dep.rawMaturityDate);
+            termMonths = (eDate.getFullYear() - sDate.getFullYear()) * 12 + (eDate.getMonth() - sDate.getMonth());
+            if(termMonths < 0) termMonths = 0;
+        } else { termMonths = parseTermToMonths(dep.rawTerm || dep.term); }
+        
+        let paid = 0; let installment = Number(dep.installment) || 0;
+        for (let i = 0; i < termMonths; i++) {
+            let expectedDate = new Date(sDate); expectedDate.setMonth(expectedDate.getMonth() + i);
+            if (today.getTime() >= expectedDate.getTime()) { paid += installment; } else { break; }
+        }
+        return paid;
+    }
+
+    function calculateBreakdown(type, principal, annualRate, startDateStr, termMonths, installment = 0, flatTotalGain = null, exactMaturityDate = null) {
+        const startDate = new Date(startDateStr); let maturityDate; let rdMonthsLimit = termMonths;
+        if (exactMaturityDate) { maturityDate = new Date(exactMaturityDate); rdMonthsLimit = (maturityDate.getFullYear() - startDate.getFullYear()) * 12 + (maturityDate.getMonth() - startDate.getMonth());
+        } else { maturityDate = new Date(startDate); maturityDate.setMonth(maturityDate.getMonth() + termMonths); }
+
+        const ratePerDay = annualRate / 100 / 365; let currentDate = new Date(startDate);
+        let currentBalance = type === 'FD' ? principal : 0; let totalInvested = type === 'FD' ? principal : 0;
+        let fyBreakdown = {}; let monthsAdded = 0;
+        const totalDays = Math.round((maturityDate - startDate) / (1000 * 60 * 60 * 24));
+        const flatGainPerDay = flatTotalGain !== null ? (flatTotalGain / totalDays) : 0;
+
+        while (currentDate < maturityDate) {
+            if (type === 'RD') {
+                let expectedDepositDate = new Date(startDate); expectedDepositDate.setMonth(expectedDepositDate.getMonth() + monthsAdded);
+                if (currentDate.getTime() === expectedDepositDate.getTime() && monthsAdded < rdMonthsLimit) { totalInvested += installment; currentBalance += installment; monthsAdded++; }
+            }
+            let year = currentDate.getFullYear(); let month = currentDate.getMonth(); 
+            let fyStartYear = month >= 3 ? year : year - 1; let fyString = `FY ${String(fyStartYear).slice(-2)}-${String(fyStartYear + 1).slice(-2)}`;
+            if (!fyBreakdown[fyString]) fyBreakdown[fyString] = 0;
+
+            if (flatTotalGain !== null) fyBreakdown[fyString] += flatGainPerDay;
+            else { let dailyInterest = currentBalance * ratePerDay; fyBreakdown[fyString] += dailyInterest; currentBalance += dailyInterest; }
+            currentDate.setDate(currentDate.getDate() + 1);
+        }
+        for (let fy in fyBreakdown) fyBreakdown[fy] = parseFloat(fyBreakdown[fy].toFixed(2));
+        const mDay = String(maturityDate.getDate()).padStart(2, '0'); const mMonth = String(maturityDate.getMonth() + 1).padStart(2, '0'); const mYear = String(maturityDate.getFullYear()).slice(-2);
+        const totalGain = flatTotalGain !== null ? flatTotalGain : (currentBalance - totalInvested);
+        return { finalPrincipal: totalInvested, totalGain: parseFloat(totalGain.toFixed(2)), maturityAmount: parseFloat((totalInvested + totalGain).toFixed(2)), maturityDate: `${mDay}-${mMonth}-${mYear}`, fyData: fyBreakdown };
+    }
+
+    // ==========================================
+    // ☁️ DATA SAVING
+    // ==========================================
+    async function saveBank() {
+        const name = document.getElementById('bankName').value; const balance = document.getElementById('bankBalance').value;
+        if (!name) return alert("Bank name required");
+
+        if (editingBankId) {
+            await db.from('banks').update({ name, balance: Number(balance) }).eq('id', editingBankId);
+            showToast("Bank Updated!");
+        } else {
+            await db.from('banks').insert([{ user_id: userSession.user.id, name, balance: Number(balance) }]);
+            showToast("Bank Added!");
+        }
+        cancelBankEdit(); fetchCloudData();
+    }
+
+    async function saveDeposit() {
+        const bankId = document.getElementById('depositBank').value; const type = document.getElementById('depositType').value;
+        const name = document.getElementById('depositName').value; const startDate = document.getElementById('startDate').value;
+        const interestInputType = document.getElementById('interestInputType').value; const rateInput = document.getElementById('rate').value;
+        const amountInput = document.getElementById('interestAmount').value; const termInputType = document.getElementById('termInputType').value;
+        let termStr = ""; let exactMaturityDate = null; let termMonths = 0;
+
+        if (!bankId || !name || !startDate) return alert("Fill required fields");
+
+        if (termInputType === 'duration') {
+            termStr = document.getElementById('depositTerm').value; if (!termStr) return alert("Enter Term Duration.");
+            termMonths = parseTermToMonths(termStr); if (termMonths === 0) return alert("Invalid term format.");
+        } else {
+            exactMaturityDate = document.getElementById('maturityDateInput').value; if (!exactMaturityDate) return alert("Enter exact Maturity Date.");
+            const sDate = new Date(startDate); const eDate = new Date(exactMaturityDate); if (eDate <= sDate) return alert("Maturity Date must be after Start Date.");
+            let mDiff = (eDate.getFullYear() - sDate.getFullYear()) * 12 + (eDate.getMonth() - sDate.getMonth());
+            if (mDiff < 0) mDiff = 0; let y = Math.floor(mDiff / 12); let m = mDiff % 12;
+            termStr = (y > 0 ? y + 'Y ' : '') + (m > 0 ? m + 'M' : ''); if (termStr === '') termStr = 'Custom Date';
+            termMonths = mDiff;
+        }
+
+        let principal = 0; let installment = 0;
+        if (type === 'RD') { installment = Number(document.getElementById('monthlyInstallment').value); if (!installment) return alert("Enter Monthly Installment"); } 
+        else { principal = Number(document.getElementById('principal').value); if (!principal) return alert("Enter Principal"); }
+
+        let calcData; let displayRateValue;
+        if (interestInputType === 'rate') {
+            if (!rateInput) return alert("Enter rate."); calcData = calculateBreakdown(type, principal, Number(rateInput), startDate, termMonths, installment, null, exactMaturityDate); displayRateValue = Number(rateInput);
+        } else {
+            if (!amountInput) return alert("Enter total interest."); calcData = calculateBreakdown(type, principal, 0, startDate, termMonths, installment, Number(amountInput), exactMaturityDate);
+            let impliedRate = 0; let gain = Number(amountInput);
+            if (termMonths > 0) { if (type === 'FD') impliedRate = (gain * 1200) / (principal * termMonths); else if (type === 'RD') impliedRate = (gain * 2400) / (installment * termMonths * (termMonths + 1)); }
+            displayRateValue = impliedRate.toFixed(2);
+        }
+
+        const sDateObj = new Date(startDate); const sDay = String(sDateObj.getDate()).padStart(2, '0');
+        const sMonth = String(sDateObj.getMonth() + 1).padStart(2, '0'); const sYear = String(sDateObj.getFullYear()).slice(-2);
+        let isArchived = false; if (editingDepositId) { const existing = appData.deposits.find(d => String(d.id) === String(editingDepositId)); if (existing) isArchived = existing.archived; }
+
+        const payloadData = {
+            type, name, termInputType: termInputType, rawTerm: termInputType === 'duration' ? document.getElementById('depositTerm').value : null,
+            rawMaturityDate: exactMaturityDate, term: termStr, startDate: `${sDay}-${sMonth}-${sYear}`, rawStartDate: startDate, 
+            installment: type === 'RD' ? installment : null, rawPrincipal: type === 'FD' ? principal : null, principal: calcData.finalPrincipal, 
+            rate: displayRateValue, rawAmount: interestInputType === 'amount' ? Number(amountInput) : null,
+            gain: calcData.totalGain, maturity: calcData.maturityAmount, maturityDate: calcData.maturityDate, fyData: calcData.fyData
         };
 
-        // ==========================================
-        // 🔐 AUTHENTICATION LOGIC
-        // ==========================================
-        async function signup() {
-            const e = document.getElementById('authEmail').value, p = document.getElementById('authPassword').value;
-            const { data, error } = await supabase.auth.signUp({ email: e, password: p });
-            if (error) document.getElementById('authError').innerText = error.message;
-            else document.getElementById('authError').innerText = "Check your email for confirmation link!";
+        if (editingDepositId) { 
+            await db.from('deposits').update({ bank_id: bankId, data: payloadData }).eq('id', editingDepositId);
+            showToast("Deposit Updated!"); 
+        } else { 
+            await db.from('deposits').insert([{ user_id: userSession.user.id, bank_id: bankId, archived: false, data: payloadData }]);
+            showToast("Deposit Added!"); 
         }
+        cancelDepositEdit(); fetchCloudData();
+    }
 
-        async function login() {
-            const e = document.getElementById('authEmail').value, p = document.getElementById('authPassword').value;
-            const { data, error } = await supabase.auth.signInWithPassword({ email: e, password: p });
-            if (error) document.getElementById('authError').innerText = error.message;
-            else handleAuthSuccess(data.session);
-        }
-
-        async function logout() {
-            await supabase.auth.signOut();
-            location.reload();
-        }
-
-        function handleAuthSuccess(session) {
-            userSession = session;
-            document.getElementById('authScreen').style.display = 'none';
-            document.getElementById('appContainer').style.display = 'block';
+    async function toggleArchive(id) { 
+        const deposit = appData.deposits.find(d => String(d.id) === String(id)); 
+        if (deposit) { 
+            await db.from('deposits').update({ archived: !deposit.archived }).eq('id', id);
+            showToast(deposit.archived ? "Unarchived!" : "Archived!"); 
             fetchCloudData();
+        } 
+    }
+
+    // ==========================================
+    // 🛑 CUSTOM ACTION MODAL & DELETIONS
+    // ==========================================
+    let pendingActionType = null; let pendingActionId = null;
+
+    function closeActionModal() { document.getElementById('actionModal').style.display = 'none'; pendingActionType = null; pendingActionId = null; }
+
+    function showActionModal(title, message, isPrompt, type, id, defaultValue = '', confirmText = 'Confirm', btnColor = 'var(--danger)') {
+        document.getElementById('actionModalHeader').innerText = title; document.getElementById('actionModalHeader').style.backgroundColor = btnColor; document.getElementById('actionModalMessage').innerText = message;
+        const inputField = document.getElementById('actionModalInput');
+        if (isPrompt) { inputField.style.display = 'block'; inputField.value = defaultValue; inputField.focus(); } else { inputField.style.display = 'none'; }
+        const confirmBtn = document.getElementById('actionModalConfirmBtn'); confirmBtn.innerText = confirmText; confirmBtn.style.background = btnColor;
+        pendingActionType = type; pendingActionId = id; document.getElementById('actionModal').style.display = 'block';
+    }
+
+    async function confirmActionModal() {
+        if (pendingActionType === 'deleteDeposit') {
+            await db.from('deposits').delete().eq('id', pendingActionId);
+            showToast("Deposit Deleted!"); fetchCloudData();
+        } else if (pendingActionType === 'deleteBank') {
+            await db.from('banks').delete().eq('id', pendingActionId);
+            showToast("Bank Deleted!"); fetchCloudData();
+        } else if (pendingActionType === 'updateBalance') {
+            const newBalance = document.getElementById('actionModalInput').value;
+            if (newBalance !== null && newBalance.trim() !== "" && !isNaN(newBalance)) { 
+                await db.from('banks').update({ balance: Number(newBalance) }).eq('id', pendingActionId);
+                showToast(`Balance updated!`); fetchCloudData();
+            }
         }
+        closeActionModal();
+    }
 
-        // ==========================================
-        // ☁️ CLOUD SYNC & STATE
-        // ==========================================
-        async function fetchCloudData() {
-            const status = document.getElementById('syncStatus');
-            status.innerText = "🔄 Fetching Cloud Data...";
-            status.classList.remove('active');
+    // ==========================================
+    // UI RENDERERS
+    // ==========================================
+    function updateChart() {
+        const canvas = document.getElementById('portfolioChart'); if (!canvas) return; const ctx = canvas.getContext('2d');
+        const labels = appData.banks.map(b => b.name); const data = appData.banks.map(b => Number(b.balance) || 0);
+        if (portfolioChart) portfolioChart.destroy(); 
+        portfolioChart = new Chart(ctx, { type: 'doughnut', data: { labels: labels, datasets: [{ label: 'Bank Balances (₹)', data: data, backgroundColor: ['#4f46e5', '#10b981', '#f59e0b', '#0ea5e9', '#ef4444', '#8b5cf6'], borderWidth: 0 }] }, options: { responsive: true, cutout: '70%', plugins: { legend: { position: 'bottom' } } } });
+    }
 
-            const { data: banksData } = await supabase.from('banks').select('*').order('name');
-            const { data: depositsData } = await supabase.from('deposits').select('*');
+    function renderDashboardSummary() {
+        const summaryBox = document.getElementById('dashboardSummary'); let grandBankBalance = 0; let grandPrincipal = 0; let grandMaturity = 0; let grandCount = 0;
+        let bankCardsHTML = `<div class="bank-summaries">`;
+        appData.banks.forEach(bank => {
+            let bBal = Number(bank.balance) || 0; grandBankBalance += bBal; let bPrin = 0; let bMat = 0; let bCount = 0;
+            appData.deposits.forEach(d => { if (String(d.bankId) === String(bank.id) && !d.archived) { bPrin += getPaidPrincipal(d); bMat += Number(d.maturity) || 0; bCount++; } });
+            grandPrincipal += bPrin; grandMaturity += bMat; grandCount += bCount;
+            bankCardsHTML += `<div class="bank-card"><h4>${bank.name}</h4><p>A/C Balance: <span>₹${bBal.toLocaleString('en-IN')}</span></p><p>Paid Principal: <span>₹${bPrin.toLocaleString('en-IN', {minimumFractionDigits: 2})}</span></p><p>Expected Maturity: <span>₹${bMat.toLocaleString('en-IN', {minimumFractionDigits: 2})}</span></p><p>Active Deposits: <span>${bCount}</span></p></div>`;
+        });
+        bankCardsHTML += `</div>`;
+        summaryBox.innerHTML = `<div class="grand-totals"><div class="summary-item"><h3>Total A/C Balance</h3><p>₹ ${grandBankBalance.toLocaleString('en-IN', {minimumFractionDigits: 2})}</p></div><div class="summary-item"><h3>Total Paid Principal</h3><p>₹ ${grandPrincipal.toLocaleString('en-IN', {minimumFractionDigits: 2})}</p></div><div class="summary-item"><h3>Total Expected Maturity</h3><p>₹ ${grandMaturity.toLocaleString('en-IN', {minimumFractionDigits: 2})}</p></div><div class="summary-item"><h3>Total Active Deposits</h3><p>${grandCount}</p></div></div>` + bankCardsHTML;
+        updateChart();
+    }
 
-            appData.banks = banksData || [];
-            
-            // Reconstruct the deposit objects from the 'data' JSONB column to match original structure
-            appData.deposits = (depositsData || []).map(row => {
-                let dep = row.data;
-                dep.id = row.id;         // Override local ID with DB UUID
-                dep.bankId = row.bank_id; // Map relationship column
-                dep.archived = row.archived;
-                return dep;
+    function toggleDepositType() { const type = document.getElementById('depositType').value; const instInput = document.getElementById('monthlyInstallment'); const princInput = document.getElementById('principal'); if (type === 'RD') { instInput.style.display = 'inline-block'; princInput.placeholder = "Total Principal (Auto)"; princInput.disabled = true; princInput.value = ''; } else { instInput.style.display = 'none'; princInput.placeholder = "Amount (₹)"; princInput.disabled = false; instInput.value = ''; } }
+    function toggleTermInput() { const type = document.getElementById('termInputType').value; document.getElementById('depositTerm').style.display = type === 'duration' ? 'inline-block' : 'none'; document.getElementById('maturityDateInput').style.display = type === 'date' ? 'inline-block' : 'none'; }
+    function toggleInterestInput() { const type = document.getElementById('interestInputType').value; document.getElementById('rate').style.display = type === 'rate' ? 'inline-block' : 'none'; document.getElementById('interestAmount').style.display = type === 'amount' ? 'inline-block' : 'none'; }
+    function cancelBankEdit() { editingBankId = null; document.getElementById('bankName').value = ''; document.getElementById('bankBalance').value = ''; document.getElementById('addBankBtn').innerText = "Save Bank"; document.getElementById('cancelBankBtn').style.display = "none"; }
+    function cancelDepositEdit() { editingDepositId = null; document.getElementById('depositName').value = ''; document.getElementById('depositTerm').value = ''; document.getElementById('maturityDateInput').value = ''; document.getElementById('startDate').value = ''; document.getElementById('monthlyInstallment').value = ''; document.getElementById('principal').value = ''; document.getElementById('rate').value = ''; document.getElementById('interestAmount').value = ''; document.getElementById('addDepositBtn').innerText = "Save Deposit"; document.getElementById('cancelDepositBtn').style.display = "none"; }
+    function renderBankDropdown() { const select = document.getElementById('depositBank'); const currentVal = select.value; select.innerHTML = '<option value="">Select Bank...</option>'; appData.banks.forEach(b => { select.innerHTML += `<option value="${b.id}">${b.name}</option>`; }); if(currentVal) select.value = currentVal; }
+
+    function renderTable() {
+        const thead = document.getElementById('ledgerHead'); const tbody = document.getElementById('ledgerBody');
+        const showArchived = document.getElementById('showArchivedToggle').checked; const sortOrder = document.getElementById('sortOrder').value;
+        thead.innerHTML = `<tr><th>Deposit Type</th><th>Principal Amount</th><th>Total Gain</th><th>Maturity Amount</th><th>Actions</th></tr>`; tbody.innerHTML = '';
+
+        appData.banks.forEach(bank => {
+            let bankDeposits = appData.deposits.filter(d => String(d.bankId) === String(bank.id) && (showArchived ? true : !d.archived));
+            bankDeposits.sort((a, b) => { if (sortOrder === 'name_asc') return a.name.localeCompare(b.name); if (sortOrder === 'maturity_asc') return parseDDMMYY(a.maturityDate) - parseDDMMYY(b.maturityDate); if (sortOrder === 'start_asc') return parseDDMMYY(a.startDate) - parseDDMMYY(b.startDate); return (a.id > b.id ? 1 : -1); });
+
+            tbody.innerHTML += `<tr class="bank-header"><td colspan="4" data-label="Bank Name" style="justify-content: flex-start; gap: 15px;"><span style="font-size: 18px;">🏦 <strong>${bank.name}</strong></span><span style="font-weight:normal; color:white; background:var(--primary); padding:4px 10px; border-radius:12px; font-size:12px; margin-left: 15px;">A/C Bal: ₹${bank.balance.toLocaleString('en-IN')}</span></td><td class="action-cell" data-label=""><div class="dropdown"><button class="dropbtn" style="background: transparent; border: 1px solid var(--border);">⚙️ Options</button><div class="dropdown-content"><button onclick="quickUpdateBalance('${bank.id}')">Update Balance</button><button onclick="editBank('${bank.id}')">Edit Bank</button><button class="danger-text" onclick="removeBank('${bank.id}')">Delete Bank</button></div></div></td></tr>`;
+
+            let bankTotalPrincipal = 0; let bankTotalGain = 0; let bankTotalMaturity = 0; 
+            bankDeposits.forEach((dep) => {
+                let currentPaidPrincipal = getPaidPrincipal(dep); bankTotalPrincipal += currentPaidPrincipal; bankTotalGain += dep.gain; bankTotalMaturity += dep.maturity;
+                let displayRate = (dep.rate === 'Custom') ? 'Custom' : `${dep.rate}%`;
+                tbody.innerHTML += `<tr>
+                    <td data-label="Deposit Type"><div class="primary-text">${dep.type === 'FD' ? 'Regular FD' : 'Recurring Deposit'}</div><div class="sub-text">Name: ${dep.name} ${dep.archived ? '(Archived)' : ''}</div></td>
+                    <td data-label="Principal Amount"><div class="primary-text">₹${currentPaidPrincipal.toLocaleString('en-IN', {minimumFractionDigits: 2})}</div><div class="sub-text">@ ${displayRate} on ${dep.startDate}</div></td>
+                    <td data-label="Total Gain"><div class="primary-text"><a class="gain-link" onclick="showFYDetails('${dep.id}')">₹${dep.gain.toLocaleString('en-IN', {minimumFractionDigits: 2})} ⓘ</a></div><div class="sub-text">Click for FY details</div></td>
+                    <td data-label="Maturity Amount"><div class="primary-text">₹${dep.maturity.toLocaleString('en-IN', {minimumFractionDigits: 2})}</div><div class="sub-text">Matures on ${dep.maturityDate}</div></td>
+                    <td class="action-cell" data-label=""><div class="dropdown"><button class="dropbtn" style="background:transparent; border: none; font-size:18px; color:var(--primary);">⋮</button><div class="dropdown-content"><button onclick="editDeposit('${dep.id}')">Edit</button><button onclick="toggleArchive('${dep.id}')">${dep.archived ? "Unarchive" : "Archive"}</button><button class="danger-text" onclick="removeDeposit('${dep.id}')">Delete</button></div></div></td></tr>`;
             });
 
-            updateLocalUI();
-            status.innerText = "✅ Synced with Supabase";
-            status.classList.add('active');
-        }
+            if (bankDeposits.length > 0) tbody.innerHTML += `<tr style="background-color: #fef9c3; border-top: 2px solid #fde047;"><td data-label="Summary" style="text-align: right;"><div class="sub-text" style="color:var(--text); font-weight:bold;">Total for ${bank.name}:</div></td><td data-label="Total Principal"><div class="primary-text" style="color: var(--primary);">₹${bankTotalPrincipal.toLocaleString('en-IN', {minimumFractionDigits: 2})}</div></td><td data-label="Total Gain"><div class="primary-text"><a class="gain-link" onclick="showBankFYDetails('${bank.id}')">₹${bankTotalGain.toLocaleString('en-IN', {minimumFractionDigits: 2})} ⓘ</a></div></td><td data-label="Total Maturity"><div class="primary-text" style="color: var(--success);">₹${bankTotalMaturity.toLocaleString('en-IN', {minimumFractionDigits: 2})}</div></td><td></td></tr>`;
+        });
+    }
 
-        function updateLocalUI() {
-            renderDashboardSummary();
-            renderBankDropdown();
-            renderTable();
-        }
-
-        // ==========================================
-        // 🗂️ UI, MATH & UTILS (From Original)
-        // ==========================================
-        function switchTab(event, viewId) {
-            document.getElementById('view-dashboard').classList.add('hidden');
-            document.getElementById('view-portfolio').classList.add('hidden');
-            document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
-            document.getElementById(viewId).classList.remove('hidden');
-            if (event && event.currentTarget) event.currentTarget.classList.add('active');
-            else document.querySelector(`[onclick="switchTab(event, '${viewId}')"]`).classList.add('active');
-            if (viewId === 'view-dashboard' && portfolioChart) portfolioChart.resize();
-        }
-
-        function showToast(message) {
-            const toast = document.getElementById("toast"); toast.innerText = message; toast.classList.add("show");
-            setTimeout(() => { toast.classList.remove("show"); }, 3000);
-        }
-
-        function parseTermToMonths(termStr) {
-            let years = 0, months = 0; const yMatch = termStr.match(/(\d+)\s*[Yy]/); const mMatch = termStr.match(/(\d+)\s*[Mm]/);
-            if (yMatch) years = parseInt(yMatch[1]); if (mMatch) months = parseInt(mMatch[1]); return (years * 12) + months;
-        }
-
-        function parseDDMMYY(str) {
-            if (!str) return 0; const parts = str.split('-'); return new Date(`20${parts[2]}`, parts[1] - 1, parts[0]).getTime();
-        }
-
-        function getPaidPrincipal(dep) {
-            if (dep.type === 'FD') return Number(dep.rawPrincipal || dep.principal) || 0;
-            let sDate = dep.rawStartDate ? new Date(dep.rawStartDate) : new Date(parseDDMMYY(dep.startDate));
-            const today = new Date(); today.setHours(0,0,0,0);
-            let termMonths = 0;
-            if (dep.termInputType === 'date' && dep.rawMaturityDate) {
-                const eDate = new Date(dep.rawMaturityDate);
-                termMonths = (eDate.getFullYear() - sDate.getFullYear()) * 12 + (eDate.getMonth() - sDate.getMonth());
-                if(termMonths < 0) termMonths = 0;
-            } else { termMonths = parseTermToMonths(dep.rawTerm || dep.term); }
-            
-            let paid = 0; let installment = Number(dep.installment) || 0;
-            for (let i = 0; i < termMonths; i++) {
-                let expectedDate = new Date(sDate); expectedDate.setMonth(expectedDate.getMonth() + i);
-                if (today.getTime() >= expectedDate.getTime()) { paid += installment; } else { break; }
-            }
-            return paid;
-        }
-
-        function calculateBreakdown(type, principal, annualRate, startDateStr, termMonths, installment = 0, flatTotalGain = null, exactMaturityDate = null) {
-            const startDate = new Date(startDateStr); let maturityDate; let rdMonthsLimit = termMonths;
-            if (exactMaturityDate) { maturityDate = new Date(exactMaturityDate); rdMonthsLimit = (maturityDate.getFullYear() - startDate.getFullYear()) * 12 + (maturityDate.getMonth() - startDate.getMonth());
-            } else { maturityDate = new Date(startDate); maturityDate.setMonth(maturityDate.getMonth() + termMonths); }
-
-            const ratePerDay = annualRate / 100 / 365; let currentDate = new Date(startDate);
-            let currentBalance = type === 'FD' ? principal : 0; let totalInvested = type === 'FD' ? principal : 0;
-            let fyBreakdown = {}; let monthsAdded = 0;
-            const totalDays = Math.round((maturityDate - startDate) / (1000 * 60 * 60 * 24));
-            const flatGainPerDay = flatTotalGain !== null ? (flatTotalGain / totalDays) : 0;
-
-            while (currentDate < maturityDate) {
-                if (type === 'RD') {
-                    let expectedDepositDate = new Date(startDate); expectedDepositDate.setMonth(expectedDepositDate.getMonth() + monthsAdded);
-                    if (currentDate.getTime() === expectedDepositDate.getTime() && monthsAdded < rdMonthsLimit) { totalInvested += installment; currentBalance += installment; monthsAdded++; }
-                }
-                let year = currentDate.getFullYear(); let month = currentDate.getMonth(); 
-                let fyStartYear = month >= 3 ? year : year - 1; let fyString = `FY ${String(fyStartYear).slice(-2)}-${String(fyStartYear + 1).slice(-2)}`;
-                if (!fyBreakdown[fyString]) fyBreakdown[fyString] = 0;
-
-                if (flatTotalGain !== null) fyBreakdown[fyString] += flatGainPerDay;
-                else { let dailyInterest = currentBalance * ratePerDay; fyBreakdown[fyString] += dailyInterest; currentBalance += dailyInterest; }
-                currentDate.setDate(currentDate.getDate() + 1);
-            }
-            for (let fy in fyBreakdown) fyBreakdown[fy] = parseFloat(fyBreakdown[fy].toFixed(2));
-            const mDay = String(maturityDate.getDate()).padStart(2, '0'); const mMonth = String(maturityDate.getMonth() + 1).padStart(2, '0'); const mYear = String(maturityDate.getFullYear()).slice(-2);
-            const totalGain = flatTotalGain !== null ? flatTotalGain : (currentBalance - totalInvested);
-            return { finalPrincipal: totalInvested, totalGain: parseFloat(totalGain.toFixed(2)), maturityAmount: parseFloat((totalInvested + totalGain).toFixed(2)), maturityDate: `${mDay}-${mMonth}-${mYear}`, fyData: fyBreakdown };
-        }
-
-        // ==========================================
-        // ☁️ DATA SAVING (Supabase Overrides)
-        // ==========================================
-        async function saveBank() {
-            const name = document.getElementById('bankName').value; const balance = document.getElementById('bankBalance').value;
-            if (!name) return alert("Bank name required");
-
-            if (editingBankId) {
-                await supabase.from('banks').update({ name, balance: Number(balance) }).eq('id', editingBankId);
-                showToast("Bank Updated!");
-            } else {
-                await supabase.from('banks').insert([{ user_id: userSession.user.id, name, balance: Number(balance) }]);
-                showToast("Bank Added!");
-            }
-            cancelBankEdit(); fetchCloudData(); // Re-fetch to update local arrays
-        }
-
-        async function saveDeposit() {
-            const bankId = document.getElementById('depositBank').value; const type = document.getElementById('depositType').value;
-            const name = document.getElementById('depositName').value; const startDate = document.getElementById('startDate').value;
-            const interestInputType = document.getElementById('interestInputType').value; const rateInput = document.getElementById('rate').value;
-            const amountInput = document.getElementById('interestAmount').value; const termInputType = document.getElementById('termInputType').value;
-            let termStr = ""; let exactMaturityDate = null; let termMonths = 0;
-
-            if (!bankId || !name || !startDate) return alert("Fill required fields");
-
-            if (termInputType === 'duration') {
-                termStr = document.getElementById('depositTerm').value; if (!termStr) return alert("Enter Term Duration.");
-                termMonths = parseTermToMonths(termStr); if (termMonths === 0) return alert("Invalid term format.");
-            } else {
-                exactMaturityDate = document.getElementById('maturityDateInput').value; if (!exactMaturityDate) return alert("Enter exact Maturity Date.");
-                const sDate = new Date(startDate); const eDate = new Date(exactMaturityDate); if (eDate <= sDate) return alert("Maturity Date must be after Start Date.");
-                let mDiff = (eDate.getFullYear() - sDate.getFullYear()) * 12 + (eDate.getMonth() - sDate.getMonth());
-                if (mDiff < 0) mDiff = 0; let y = Math.floor(mDiff / 12); let m = mDiff % 12;
-                termStr = (y > 0 ? y + 'Y ' : '') + (m > 0 ? m + 'M' : ''); if (termStr === '') termStr = 'Custom Date';
-                termMonths = mDiff;
-            }
-
-            let principal = 0; let installment = 0;
-            if (type === 'RD') { installment = Number(document.getElementById('monthlyInstallment').value); if (!installment) return alert("Enter Monthly Installment"); } 
-            else { principal = Number(document.getElementById('principal').value); if (!principal) return alert("Enter Principal"); }
-
-            let calcData; let displayRateValue;
-            if (interestInputType === 'rate') {
-                if (!rateInput) return alert("Enter rate."); calcData = calculateBreakdown(type, principal, Number(rateInput), startDate, termMonths, installment, null, exactMaturityDate); displayRateValue = Number(rateInput);
-            } else {
-                if (!amountInput) return alert("Enter total interest."); calcData = calculateBreakdown(type, principal, 0, startDate, termMonths, installment, Number(amountInput), exactMaturityDate);
-                let impliedRate = 0; let gain = Number(amountInput);
-                if (termMonths > 0) { if (type === 'FD') impliedRate = (gain * 1200) / (principal * termMonths); else if (type === 'RD') impliedRate = (gain * 2400) / (installment * termMonths * (termMonths + 1)); }
-                displayRateValue = impliedRate.toFixed(2);
-            }
-
-            const sDateObj = new Date(startDate); const sDay = String(sDateObj.getDate()).padStart(2, '0');
-            const sMonth = String(sDateObj.getMonth() + 1).padStart(2, '0'); const sYear = String(sDateObj.getFullYear()).slice(-2);
-            let isArchived = false; if (editingDepositId) { const existing = appData.deposits.find(d => String(d.id) === String(editingDepositId)); if (existing) isArchived = existing.archived; }
-
-            const payloadData = {
-                type, name, termInputType: termInputType, rawTerm: termInputType === 'duration' ? document.getElementById('depositTerm').value : null,
-                rawMaturityDate: exactMaturityDate, term: termStr, startDate: `${sDay}-${sMonth}-${sYear}`, rawStartDate: startDate, 
-                installment: type === 'RD' ? installment : null, rawPrincipal: type === 'FD' ? principal : null, principal: calcData.finalPrincipal, 
-                rate: displayRateValue, rawAmount: interestInputType === 'amount' ? Number(amountInput) : null,
-                gain: calcData.totalGain, maturity: calcData.maturityAmount, maturityDate: calcData.maturityDate, fyData: calcData.fyData
-            };
-
-            if (editingDepositId) { 
-                await supabase.from('deposits').update({ bank_id: bankId, data: payloadData }).eq('id', editingDepositId);
-                showToast("Deposit Updated!"); 
-            } else { 
-                await supabase.from('deposits').insert([{ user_id: userSession.user.id, bank_id: bankId, archived: false, data: payloadData }]);
-                showToast("Deposit Added!"); 
-            }
-            cancelDepositEdit(); fetchCloudData();
-        }
-
-        async function toggleArchive(id) { 
-            const deposit = appData.deposits.find(d => String(d.id) === String(id)); 
-            if (deposit) { 
-                await supabase.from('deposits').update({ archived: !deposit.archived }).eq('id', id);
-                showToast(deposit.archived ? "Unarchived!" : "Archived!"); 
-                fetchCloudData();
-            } 
-        }
-
-        // ==========================================
-        // 🛑 CUSTOM ACTION MODAL & DELETIONS
-        // ==========================================
-        let pendingActionType = null; let pendingActionId = null;
-
-        function closeActionModal() { document.getElementById('actionModal').style.display = 'none'; pendingActionType = null; pendingActionId = null; }
-
-        function showActionModal(title, message, isPrompt, type, id, defaultValue = '', confirmText = 'Confirm', btnColor = 'var(--danger)') {
-            document.getElementById('actionModalHeader').innerText = title; document.getElementById('actionModalHeader').style.backgroundColor = btnColor; document.getElementById('actionModalMessage').innerText = message;
-            const inputField = document.getElementById('actionModalInput');
-            if (isPrompt) { inputField.style.display = 'block'; inputField.value = defaultValue; inputField.focus(); } else { inputField.style.display = 'none'; }
-            const confirmBtn = document.getElementById('actionModalConfirmBtn'); confirmBtn.innerText = confirmText; confirmBtn.style.background = btnColor;
-            pendingActionType = type; pendingActionId = id; document.getElementById('actionModal').style.display = 'block';
-        }
-
-        async function confirmActionModal() {
-            if (pendingActionType === 'deleteDeposit') {
-                await supabase.from('deposits').delete().eq('id', pendingActionId);
-                showToast("Deposit Deleted!"); fetchCloudData();
-            } else if (pendingActionType === 'deleteBank') {
-                await supabase.from('banks').delete().eq('id', pendingActionId);
-                showToast("Bank Deleted!"); fetchCloudData();
-            } else if (pendingActionType === 'updateBalance') {
-                const newBalance = document.getElementById('actionModalInput').value;
-                if (newBalance !== null && newBalance.trim() !== "" && !isNaN(newBalance)) { 
-                    await supabase.from('banks').update({ balance: Number(newBalance) }).eq('id', pendingActionId);
-                    showToast(`Balance updated!`); fetchCloudData();
-                }
-            }
-            closeActionModal();
-        }
-
-        // (The rest of the UI rendering functions from original file)
-        function updateChart() {
-            const canvas = document.getElementById('portfolioChart'); if (!canvas) return; const ctx = canvas.getContext('2d');
-            const labels = appData.banks.map(b => b.name); const data = appData.banks.map(b => Number(b.balance) || 0);
-            if (portfolioChart) portfolioChart.destroy(); 
-            portfolioChart = new Chart(ctx, { type: 'doughnut', data: { labels: labels, datasets: [{ label: 'Bank Balances (₹)', data: data, backgroundColor: ['#4f46e5', '#10b981', '#f59e0b', '#0ea5e9', '#ef4444', '#8b5cf6'], borderWidth: 0 }] }, options: { responsive: true, cutout: '70%', plugins: { legend: { position: 'bottom' } } } });
-        }
-
-        function renderDashboardSummary() {
-            const summaryBox = document.getElementById('dashboardSummary'); let grandBankBalance = 0; let grandPrincipal = 0; let grandMaturity = 0; let grandCount = 0;
-            let bankCardsHTML = `<div class="bank-summaries">`;
-            appData.banks.forEach(bank => {
-                let bBal = Number(bank.balance) || 0; grandBankBalance += bBal; let bPrin = 0; let bMat = 0; let bCount = 0;
-                appData.deposits.forEach(d => { if (String(d.bankId) === String(bank.id) && !d.archived) { bPrin += getPaidPrincipal(d); bMat += Number(d.maturity) || 0; bCount++; } });
-                grandPrincipal += bPrin; grandMaturity += bMat; grandCount += bCount;
-                bankCardsHTML += `<div class="bank-card"><h4>${bank.name}</h4><p>A/C Balance: <span>₹${bBal.toLocaleString('en-IN')}</span></p><p>Paid Principal: <span>₹${bPrin.toLocaleString('en-IN', {minimumFractionDigits: 2})}</span></p><p>Expected Maturity: <span>₹${bMat.toLocaleString('en-IN', {minimumFractionDigits: 2})}</span></p><p>Active Deposits: <span>${bCount}</span></p></div>`;
-            });
-            bankCardsHTML += `</div>`;
-            summaryBox.innerHTML = `<div class="grand-totals"><div class="summary-item"><h3>Total A/C Balance</h3><p>₹ ${grandBankBalance.toLocaleString('en-IN', {minimumFractionDigits: 2})}</p></div><div class="summary-item"><h3>Total Paid Principal</h3><p>₹ ${grandPrincipal.toLocaleString('en-IN', {minimumFractionDigits: 2})}</p></div><div class="summary-item"><h3>Total Expected Maturity</h3><p>₹ ${grandMaturity.toLocaleString('en-IN', {minimumFractionDigits: 2})}</p></div><div class="summary-item"><h3>Total Active Deposits</h3><p>${grandCount}</p></div></div>` + bankCardsHTML;
-            updateChart();
-        }
-
-        function toggleDepositType() { const type = document.getElementById('depositType').value; const instInput = document.getElementById('monthlyInstallment'); const princInput = document.getElementById('principal'); if (type === 'RD') { instInput.style.display = 'inline-block'; princInput.placeholder = "Total Principal (Auto)"; princInput.disabled = true; princInput.value = ''; } else { instInput.style.display = 'none'; princInput.placeholder = "Amount (₹)"; princInput.disabled = false; instInput.value = ''; } }
-        function toggleTermInput() { const type = document.getElementById('termInputType').value; document.getElementById('depositTerm').style.display = type === 'duration' ? 'inline-block' : 'none'; document.getElementById('maturityDateInput').style.display = type === 'date' ? 'inline-block' : 'none'; }
-        function toggleInterestInput() { const type = document.getElementById('interestInputType').value; document.getElementById('rate').style.display = type === 'rate' ? 'inline-block' : 'none'; document.getElementById('interestAmount').style.display = type === 'amount' ? 'inline-block' : 'none'; }
-        function cancelBankEdit() { editingBankId = null; document.getElementById('bankName').value = ''; document.getElementById('bankBalance').value = ''; document.getElementById('addBankBtn').innerText = "Save Bank"; document.getElementById('cancelBankBtn').style.display = "none"; }
-        function cancelDepositEdit() { editingDepositId = null; document.getElementById('depositName').value = ''; document.getElementById('depositTerm').value = ''; document.getElementById('maturityDateInput').value = ''; document.getElementById('startDate').value = ''; document.getElementById('monthlyInstallment').value = ''; document.getElementById('principal').value = ''; document.getElementById('rate').value = ''; document.getElementById('interestAmount').value = ''; document.getElementById('addDepositBtn').innerText = "Save Deposit"; document.getElementById('cancelDepositBtn').style.display = "none"; }
-        function renderBankDropdown() { const select = document.getElementById('depositBank'); const currentVal = select.value; select.innerHTML = '<option value="">Select Bank...</option>'; appData.banks.forEach(b => { select.innerHTML += `<option value="${b.id}">${b.name}</option>`; }); if(currentVal) select.value = currentVal; }
-
-        function renderTable() {
-            const thead = document.getElementById('ledgerHead'); const tbody = document.getElementById('ledgerBody');
-            const showArchived = document.getElementById('showArchivedToggle').checked; const sortOrder = document.getElementById('sortOrder').value;
-            thead.innerHTML = `<tr><th>Deposit Type</th><th>Principal Amount</th><th>Total Gain</th><th>Maturity Amount</th><th>Actions</th></tr>`; tbody.innerHTML = '';
-
-            appData.banks.forEach(bank => {
-                let bankDeposits = appData.deposits.filter(d => String(d.bankId) === String(bank.id) && (showArchived ? true : !d.archived));
-                bankDeposits.sort((a, b) => { if (sortOrder === 'name_asc') return a.name.localeCompare(b.name); if (sortOrder === 'maturity_asc') return parseDDMMYY(a.maturityDate) - parseDDMMYY(b.maturityDate); if (sortOrder === 'start_asc') return parseDDMMYY(a.startDate) - parseDDMMYY(b.startDate); return (a.id > b.id ? 1 : -1); });
-
-                tbody.innerHTML += `<tr class="bank-header"><td colspan="4" data-label="Bank Name" style="justify-content: flex-start; gap: 15px;"><span style="font-size: 18px;">🏦 <strong>${bank.name}</strong></span><span style="font-weight:normal; color:white; background:var(--primary); padding:4px 10px; border-radius:12px; font-size:12px; margin-left: 15px;">A/C Bal: ₹${bank.balance.toLocaleString('en-IN')}</span></td><td class="action-cell" data-label=""><div class="dropdown"><button class="dropbtn" style="background: transparent; border: 1px solid var(--border);">⚙️ Options</button><div class="dropdown-content"><button onclick="quickUpdateBalance('${bank.id}')">Update Balance</button><button onclick="editBank('${bank.id}')">Edit Bank</button><button class="danger-text" onclick="removeBank('${bank.id}')">Delete Bank</button></div></div></td></tr>`;
-
-                let bankTotalPrincipal = 0; let bankTotalGain = 0; let bankTotalMaturity = 0; 
-                bankDeposits.forEach((dep) => {
-                    let currentPaidPrincipal = getPaidPrincipal(dep); bankTotalPrincipal += currentPaidPrincipal; bankTotalGain += dep.gain; bankTotalMaturity += dep.maturity;
-                    let displayRate = (dep.rate === 'Custom') ? 'Custom' : `${dep.rate}%`;
-                    tbody.innerHTML += `<tr>
-                        <td data-label="Deposit Type"><div class="primary-text">${dep.type === 'FD' ? 'Regular FD' : 'Recurring Deposit'}</div><div class="sub-text">Name: ${dep.name} ${dep.archived ? '(Archived)' : ''}</div></td>
-                        <td data-label="Principal Amount"><div class="primary-text">₹${currentPaidPrincipal.toLocaleString('en-IN', {minimumFractionDigits: 2})}</div><div class="sub-text">@ ${displayRate} on ${dep.startDate}</div></td>
-                        <td data-label="Total Gain"><div class="primary-text"><a class="gain-link" onclick="showFYDetails('${dep.id}')">₹${dep.gain.toLocaleString('en-IN', {minimumFractionDigits: 2})} ⓘ</a></div><div class="sub-text">Click for FY details</div></td>
-                        <td data-label="Maturity Amount"><div class="primary-text">₹${dep.maturity.toLocaleString('en-IN', {minimumFractionDigits: 2})}</div><div class="sub-text">Matures on ${dep.maturityDate}</div></td>
-                        <td class="action-cell" data-label=""><div class="dropdown"><button class="dropbtn" style="background:transparent; border: none; font-size:18px; color:var(--primary);">⋮</button><div class="dropdown-content"><button onclick="editDeposit('${dep.id}')">Edit</button><button onclick="toggleArchive('${dep.id}')">${dep.archived ? "Unarchive" : "Archive"}</button><button class="danger-text" onclick="removeDeposit('${dep.id}')">Delete</button></div></div></td></tr>`;
-                });
-
-                if (bankDeposits.length > 0) tbody.innerHTML += `<tr style="background-color: #fef9c3; border-top: 2px solid #fde047;"><td data-label="Summary" style="text-align: right;"><div class="sub-text" style="color:var(--text); font-weight:bold;">Total for ${bank.name}:</div></td><td data-label="Total Principal"><div class="primary-text" style="color: var(--primary);">₹${bankTotalPrincipal.toLocaleString('en-IN', {minimumFractionDigits: 2})}</div></td><td data-label="Total Gain"><div class="primary-text"><a class="gain-link" onclick="showBankFYDetails('${bank.id}')">₹${bankTotalGain.toLocaleString('en-IN', {minimumFractionDigits: 2})} ⓘ</a></div></td><td data-label="Total Maturity"><div class="primary-text" style="color: var(--success);">₹${bankTotalMaturity.toLocaleString('en-IN', {minimumFractionDigits: 2})}</div></td><td></td></tr>`;
-            });
-        }
-
-        function editBank(id) { const bank = appData.banks.find(b => String(b.id) === String(id)); if (!bank) return; editingBankId = bank.id; document.getElementById('bankName').value = bank.name; document.getElementById('bankBalance').value = bank.balance; document.getElementById('addBankBtn').innerText = "Update Bank"; document.getElementById('cancelBankBtn').style.display = "inline-flex"; switchTab(null, 'view-portfolio'); window.scrollTo({ top: 0, behavior: 'smooth' }); }
-        function editDeposit(id) { const dep = appData.deposits.find(d => String(d.id) === String(id)); if (!dep) return; editingDepositId = dep.id; document.getElementById('depositBank').value = dep.bankId; document.getElementById('depositType').value = dep.type; toggleDepositType(); document.getElementById('depositName').value = dep.name; document.getElementById('startDate').value = dep.rawStartDate || ''; document.getElementById('termInputType').value = dep.termInputType || 'duration'; toggleTermInput(); if (dep.termInputType === 'date') { document.getElementById('maturityDateInput').value = dep.rawMaturityDate || ''; } else { document.getElementById('depositTerm').value = dep.rawTerm || dep.term; } if (dep.type === 'RD') document.getElementById('monthlyInstallment').value = dep.installment; else document.getElementById('principal').value = dep.rawPrincipal || dep.principal; if (dep.rawAmount !== null && dep.rawAmount !== undefined) { document.getElementById('interestInputType').value = 'amount'; document.getElementById('interestAmount').value = dep.rawAmount; } else if (dep.rate === 'Custom') { document.getElementById('interestInputType').value = 'amount'; document.getElementById('interestAmount').value = dep.gain; } else { document.getElementById('interestInputType').value = 'rate'; document.getElementById('rate').value = dep.rate; } toggleInterestInput(); document.getElementById('addDepositBtn').innerText = "Update Deposit"; document.getElementById('cancelDepositBtn').style.display = "inline-flex"; switchTab(null, 'view-portfolio'); window.scrollTo({ top: 0, behavior: 'smooth' }); }
-        function quickUpdateBalance(id) { const bank = appData.banks.find(b => String(b.id) === String(id)); if (!bank) return; showActionModal("Update Account Balance", `Enter new Account Balance for ${bank.name}:`, true, 'updateBalance', id, bank.balance, 'Update', 'var(--primary)'); }
-        function removeDeposit(id) { showActionModal("Delete Deposit", "Are you sure you want to permanently delete this deposit?", false, 'deleteDeposit', id, '', 'Delete', 'var(--danger)'); }
-        function removeBank(id) { showActionModal("Delete Bank", "Are you sure you want to delete this bank AND all its deposits?", false, 'deleteBank', id, '', 'Delete', 'var(--danger)'); }
-        
-        function showFYDetails(depositId) { const dep = appData.deposits.find(d => String(d.id) === String(depositId)); if (!dep || !dep.fyData) return; buildFYModalTable(dep.fyData); }
-        function showBankFYDetails(bankId) { let bankDeposits = appData.deposits.filter(d => String(d.bankId) === String(bankId) && (!document.getElementById('showArchivedToggle').checked ? !d.archived : true)); let bankTotalFY = {}; bankDeposits.forEach(dep => { if (dep.fyData) { Object.keys(dep.fyData).forEach(fy => { bankTotalFY[fy] = (bankTotalFY[fy] || 0) + dep.fyData[fy]; }); } }); buildFYModalTable(bankTotalFY); }
-        function buildFYModalTable(fyDataObject) { let tableHTML = `<table class="fy-table"><thead><tr><th>Year</th><th>Interest</th></tr></thead><tbody>`; let fyKeys = Object.keys(fyDataObject).sort(); fyKeys.forEach(fy => { let amount = fyDataObject[fy]; if (amount > 0) { let cleanYear = fy.replace('FY ', '20'); tableHTML += `<tr><td>${cleanYear}</td><td>₹ ${amount.toLocaleString('en-IN', {minimumFractionDigits: 0})}</td></tr>`; } }); tableHTML += `</tbody></table>`; document.getElementById('fyModalBody').innerHTML = tableHTML; document.getElementById('fyModal').style.display = 'block'; }
-        function closeModal() { document.getElementById('fyModal').style.display = 'none'; }
-        window.onclick = function(event) { let fyModal = document.getElementById('fyModal'); let actionModal = document.getElementById('actionModal'); if (event.target == fyModal) { fyModal.style.display = "none"; } if (event.target == actionModal) { closeActionModal(); } }
-    </script>
+    function editBank(id) { const bank = appData.banks.find(b => String(b.id) === String(id)); if (!bank) return; editingBankId = bank.id; document.getElementById('bankName').value = bank.name; document.getElementById('bankBalance').value = bank.balance; document.getElementById('addBankBtn').innerText = "Update Bank"; document.getElementById('cancelBankBtn').style.display = "inline-flex"; switchTab(null, 'view-portfolio'); window.scrollTo({ top: 0, behavior: 'smooth' }); }
+    function editDeposit(id) { const dep = appData.deposits.find(d => String(d.id) === String(id)); if (!dep) return; editingDepositId = dep.id; document.getElementById('depositBank').value = dep.bankId; document.getElementById('depositType').value = dep.type; toggleDepositType(); document.getElementById('depositName').value = dep.name; document.getElementById('startDate').value = dep.rawStartDate || ''; document.getElementById('termInputType').value = dep.termInputType || 'duration'; toggleTermInput(); if (dep.termInputType === 'date') { document.getElementById('maturityDateInput').value = dep.rawMaturityDate || ''; } else { document.getElementById('depositTerm').value = dep.rawTerm || dep.term; } if (dep.type === 'RD') document.getElementById('monthlyInstallment').value = dep.installment; else document.getElementById('principal').value = dep.rawPrincipal || dep.principal; if (dep.rawAmount !== null && dep.rawAmount !== undefined) { document.getElementById('interestInputType').value = 'amount'; document.getElementById('interestAmount').value = dep.rawAmount; } else if (dep.rate === 'Custom') { document.getElementById('interestInputType').value = 'amount'; document.getElementById('interestAmount').value = dep.gain; } else { document.getElementById('interestInputType').value = 'rate'; document.getElementById('rate').value = dep.rate; } toggleInterestInput(); document.getElementById('addDepositBtn').innerText = "Update Deposit"; document.getElementById('cancelDepositBtn').style.display = "inline-flex"; switchTab(null, 'view-portfolio'); window.scrollTo({ top: 0, behavior: 'smooth' }); }
+    function quickUpdateBalance(id) { const bank = appData.banks.find(b => String(b.id) === String(id)); if (!bank) return; showActionModal("Update Account Balance", `Enter new Account Balance for ${bank.name}:`, true, 'updateBalance', id, bank.balance, 'Update', 'var(--primary)'); }
+    function removeDeposit(id) { showActionModal("Delete Deposit", "Are you sure you want to permanently delete this deposit?", false, 'deleteDeposit', id, '', 'Delete', 'var(--danger)'); }
+    function removeBank(id) { showActionModal("Delete Bank", "Are you sure you want to delete this bank AND all its deposits?", false, 'deleteBank', id, '', 'Delete', 'var(--danger)'); }
+    
+    function showFYDetails(depositId) { const dep = appData.deposits.find(d => String(d.id) === String(depositId)); if (!dep || !dep.fyData) return; buildFYModalTable(dep.fyData); }
+    function showBankFYDetails(bankId) { let bankDeposits = appData.deposits.filter(d => String(d.bankId) === String(bankId) && (!document.getElementById('showArchivedToggle').checked ? !d.archived : true)); let bankTotalFY = {}; bankDeposits.forEach(dep => { if (dep.fyData) { Object.keys(dep.fyData).forEach(fy => { bankTotalFY[fy] = (bankTotalFY[fy] || 0) + dep.fyData[fy]; }); } }); buildFYModalTable(bankTotalFY); }
+    function buildFYModalTable(fyDataObject) { let tableHTML = `<table class="fy-table"><thead><tr><th>Year</th><th>Interest</th></tr></thead><tbody>`; let fyKeys = Object.keys(fyDataObject).sort(); fyKeys.forEach(fy => { let amount = fyDataObject[fy]; if (amount > 0) { let cleanYear = fy.replace('FY ', '20'); tableHTML += `<tr><td>${cleanYear}</td><td>₹ ${amount.toLocaleString('en-IN', {minimumFractionDigits: 0})}</td></tr>`; } }); tableHTML += `</tbody></table>`; document.getElementById('fyModalBody').innerHTML = tableHTML; document.getElementById('fyModal').style.display = 'block'; }
+    function closeModal() { document.getElementById('fyModal').style.display = 'none'; }
+    window.onclick = function(event) { let fyModal = document.getElementById('fyModal'); let actionModal = document.getElementById('actionModal'); if (event.target == fyModal) { fyModal.style.display = "none"; } if (event.target == actionModal) { closeActionModal(); } }
+</script>
 </body>
 </html>
